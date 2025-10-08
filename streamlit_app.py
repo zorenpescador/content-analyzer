@@ -1,452 +1,533 @@
 import streamlit as st
 import re
-from typing import Dict, Any, Tuple
+import math
 
-# --- Configuration and Weights (Based on Google Ranking Systems Explained) ---
+# --- Configuration and Styling ---
 
-MAX_SCORE = 100
-WEIGHTS = {
-    # I. Editorial & Authority (Max 35 pts)
-    "EEAT_EXPERIENCE": 10,
-    "EEAT_TRUST_EXPERT": 15,
-    "UTILITY_DEPTH": 10,
-    # II. Topical Relevance (Max 20 pts)
-    "KEYWORD_RELEVANCE": 20,
-    # III. Integrity (SpamBrain, AI) (Max 20 pts)
-    "INTEGRITY_COMPLIANCE": 20, 
-    # IV. Technical, Freshness & Link Strategy (Max 25 pts)
-    "TECHNICAL_FRESHNESS": 25,
-}
+st.set_page_config(layout="wide", page_title="Advanced Content Quality Analyzer")
 
-# Key phrases derived from the "Google Ranking Systems Explained" document
-EEAT_EXPERIENCE_KEYWORDS = [
-    r"i tested", r"in my experience", r"my results", r"proprietary data", 
-    r"i found that", r"after using", r"i discovered", r"original analysis"
-]
+# Custom CSS for better styling and readability
+st.markdown("""
+<style>
+    /* Main Streamlit container width */
+    .reportview-container .main {
+        padding-top: 2rem;
+    }
+    /* Header styling */
+    h1 {
+        font-size: 2.5rem;
+        color: #1A73E8; /* Google Blue */
+        border-bottom: 2px solid #D9D9D9;
+        padding-bottom: 5px;
+        margin-bottom: 10px;
+    }
+    /* Section headers */
+    h3 {
+        color: #3C4043;
+        font-weight: 600;
+        margin-top: 1.5rem;
+    }
+    /* Score card styling */
+    .score-card {
+        border: 1px solid #E8EAED;
+        padding: 10px;
+        border-radius: 8px;
+        background-color: #F8F9FA;
+        margin-bottom: 10px;
+        text-align: center;
+    }
+    .score-value {
+        font-size: 2.5rem;
+        font-weight: 700;
+    }
+    .score-label {
+        font-size: 0.9rem;
+        color: #5F6368;
+    }
+    /* Priority list styling */
+    .priority-item {
+        background-color: #FCE8E6; /* Light red for urgency */
+        border-left: 5px solid #EA4335;
+        padding: 8px;
+        margin-bottom: 5px;
+        border-radius: 4px;
+        font-weight: 500;
+    }
+    /* Finding boxes */
+    .positive-cue {
+        color: #0D723C;
+        font-weight: 500;
+    }
+    .missing-signal {
+        color: #A60000;
+        font-weight: 500;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# --- Analysis Constants (Derived from Google Ranking Systems Research) ---
+
+# Section 1: E-E-A-T (Experience, Expertise, Authority, Trust) & Utility (Max 40 Pts)
+EEAT_MAX_SCORE = 40
 EEAT_TRUST_KEYWORDS = [
-    r"author:", r"byline", r"credentials", r"references", r"cited", 
-    r"disclaimer", r"verified by", r"published in"
+    r"author:", r"cited", r"sources", r"data suggests", r"peer-reviewed", r"methodology", r"disclosure"
 ]
-SPAM_MANIPULATION_KEYWORDS = [
-    r"buy now", r"best price", r"click here", r"unbeatable", 
-    r"limited time offer", r"money back guarantee", r"must have"
+EEAT_EXPERIENCE_KEYWORDS = [
+    r"i found that", r"after using", r"i discovered", r"original analysis", r"hands-on", r"i tested", r"first-hand"
+]
+UTILITY_KEYWORDS = [
+    r"step-by-step", r"how to", r"tutorial", r"actionable", r"comprehensive", r"guide", r"in-depth"
+]
+# Weighting: 20 pts for EEAT cues, 20 pts for Utility/Depth/Intent
+
+# Section 2: Keyword Relevance & Placement (Max 20 Pts)
+KEYWORD_MAX_SCORE = 20
+KEYWORD_DENSITY_TARGET = (0.5, 2.5) # Target percentage range
+KEYWORD_PLACEMENT_LENGTH = 150 # Check for keyword presence in the first 150 characters
+
+# Section 3: Integrity & Compliance (SpamBrain / Helpful Content) (Max 20 Pts)
+INTEGRITY_MAX_SCORE = 20
+SPAMMY_KEYWORDS = [
+    r"buy now", r"click here", r"unbeatable deal", r"limited time offer", r"guaranteed", r"cash back", r"instant access"
+]
+REPETITIVE_PHRASES = [
+    r"very good article", r"is a great product", r"fantastic opportunity", r"the best thing" # Generic, formulaic phrases
 ]
 AI_DISCLOSURE_KEYWORDS = [
-    r"ai-generated", r"automated content", r"large language model", 
-    r"edited by ai"
+    r"ai-generated", r"ai writer", r"automated content", r"llm", r"model-assisted"
 ]
-REPETITIVE_PATTERNS = [
-    r"it is a great", r"this is the best", r"very great", r"fantastic opportunity"
-]
-# New keywords for Freshness and Linking strategy
-FRESHNESS_LINKING_KEYWORDS = {
-    "internal_link": r"\[internal link\]",
-    "external_link": r"\[external link\]",
-    "updated_date": r"updated:\s*\d{4}|\bas of\s*\d{4}" # e.g., "Updated: 2024" or "as of 2025"
-}
+MIN_WORD_COUNT = 300 # Heuristic for thin content penalty
 
+# Section 4: Technical, Freshness & Link Strategy (Page Experience / Site Quality) (Max 20 Pts)
+TECH_MAX_SCORE = 20
+FRESHNESS_KEYWORDS = [r"updated:", r"current as of", r"latest research", r"recent changes"]
+LINK_PLACEHOLDERS = [r"\[internal link", r"\[external link"]
+# Usability Check: Short paragraphs (3-7 sentences recommended for mobile UX)
 
-def segment_content(content: str) -> Dict[str, Any]:
-    """Splits content into sections and extracts structural data."""
-    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
-    if not paragraphs:
-        return {"intro": "", "body": "", "conclusion": "", "paragraphs": [], "headings": []}
+# --- Core Analysis Functions ---
 
-    intro = paragraphs[0]
-    conclusion = paragraphs[-1] if len(paragraphs) > 1 else ""
-    body = "\n\n".join(paragraphs[1:-1]) if len(paragraphs) > 2 else ""
-    
-    headings = re.findall(r'(##|###|####)\s*(.*)', content)
-    
-    return {"intro": intro, "body": body, "conclusion": conclusion, "paragraphs": paragraphs, "headings": headings}
-
-
-def calculate_flesch_reading_ease(content: str) -> float:
-    """Calculates a simplified Flesch Reading Ease score (proxy)."""
-    sentences = re.split(r'[.!?]+', content)
+def calculate_reading_ease(text):
+    """Calculates a simplified Flesch Kincaid Reading Ease score (0-100)."""
+    sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
-    
-    words = re.findall(r'\b\w+\b', content)
-    word_count = len(words)
-    sentence_count = len(sentences)
 
-    if word_count == 0 or sentence_count == 0:
-        return 0.0
+    words = re.findall(r'\b\w+\b', text)
+    syllables = sum(len(re.findall(r'[aeiouy]+', word.lower())) for word in words)
 
-    # Proxy for Syllables per Word (ASW) - generally averages 1.5 in English
-    ASL = word_count / sentence_count
-    ASW = 1.5 # Fixed proxy for simplicity
-    
-    flesch_score = 206.835 - (1.015 * ASL) - (84.6 * ASW)
-    return max(0, flesch_score)
+    if not words or not sentences:
+        return 100, "N/A"
 
+    ASL = len(words) / len(sentences) # Average Sentence Length
+    ASW = syllables / len(words) # Average Syllables per Word
 
-def analyze_content(content: str, target_keyword: str) -> Dict[str, Any]:
-    """Analyzes content against all core ranking system mandates."""
-    content_lower = content.lower()
-    sections = segment_content(content)
-    word_count = len(re.findall(r'\b\w+\b', content))
-    
-    results = {
-        "word_count": word_count,
-        "flesch_ease": calculate_flesch_reading_ease(content),
-        "total_score": 0,
-        "sections": {}
+    # Flesch Reading Ease Formula (Simplified)
+    score = 206.835 - 1.015 * ASL - 84.6 * ASW
+
+    grade = "Complex (Post-Graduate)"
+    if score >= 60:
+        grade = "Fairly Easy (8th-9th Grade)"
+    if score >= 70:
+        grade = "Easy (6th-7th Grade)"
+    if score >= 80:
+        grade = "Very Easy (5th Grade)"
+
+    return max(0, min(100, score)), grade
+
+def analyze_content(content, target_keyword):
+    """Performs the full analysis based on the ranking system mandates."""
+    findings = {
+        'priority_actions': [],
+        'eeat': {'score': 0, 'cues': [], 'missing': [], 'max': EEAT_MAX_SCORE},
+        'keyword': {'score': 0, 'cues': [], 'missing': [], 'max': KEYWORD_MAX_SCORE},
+        'integrity': {'score': 0, 'cues': [], 'missing': [], 'max': INTEGRITY_MAX_SCORE},
+        'technical': {'score': 0, 'cues': [], 'missing': [], 'max': TECH_MAX_SCORE},
     }
+    total_score = 0
+    clean_content = content.lower()
+    word_count = len(re.findall(r'\b\w+\b', clean_content))
 
-    # --- Core Analysis Functions ---
+    # --- Content Segmentation ---
+    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
+    intro_content = paragraphs[0].lower() if paragraphs else ""
+    conclusion_content = paragraphs[-1].lower() if len(paragraphs) > 1 else ""
 
-    def check_eeat_utility(content_lower: str, word_count: int, sections: Dict[str, Any]) -> Tuple[float, list]:
-        """I. Editorial & Authority: E-E-A-T, Utility, and Intent (Max 35 pts)"""
-        score = 0
-        findings = []
-        
-        # 1. Experience & Originality (Max 10 pts)
-        experience_matches = sum(len(re.findall(k, content_lower)) for k in EEAT_EXPERIENCE_KEYWORDS)
-        
-        if experience_matches >= 4:
-            score += WEIGHTS['EEAT_EXPERIENCE']
-            findings.append({"type": "Good", "text": f"Strong experiential language detected ({experience_matches} cues). (Mandate: **Experience**)"})
+    # --- Helper: Add Missing Signal ---
+    def add_missing(section_key, signal, priority=False):
+        findings[section_key]['missing'].append(signal)
+        if priority:
+            findings['priority_actions'].append(signal)
+
+    # --- 1. E-E-A-T & Utility Analysis (Max 40 Pts) ---
+    score_eeat = 0
+
+    # A. Experience & Trust (Weighted 25 pts)
+    eeat_cues = 0
+    for keyword in EEAT_EXPERIENCE_KEYWORDS:
+        if re.search(keyword, clean_content):
+            findings['eeat']['cues'].append(f"Found Experience cue: '{keyword.strip('r\\').replace('r\\', '')}'")
+            eeat_cues += 1
+    for keyword in EEAT_TRUST_KEYWORDS:
+        if re.search(keyword, clean_content):
+            findings['eeat']['cues'].append(f"Found Trust cue: '{keyword.strip('r\\').replace('r\\', '')}'")
+            eeat_cues += 1
+
+    if eeat_cues > 0:
+        score_eeat += min(25, eeat_cues * 5)
+    else:
+        add_missing('eeat', "No clear **first-hand experience** or **trust signals** (e.g., 'I tested,' 'cited sources').", True)
+
+    # B. Utility & Intent Fulfillment (Weighted 15 pts)
+    utility_cues = 0
+    for keyword in UTILITY_KEYWORDS:
+        if re.search(keyword, clean_content):
+            findings['eeat']['cues'].append(f"Found Utility cue: '{keyword.strip('r\\').replace('r\\', '')}'")
+            utility_cues += 1
+
+    # Check for Explicit Question-Answer Structure (Signals High Intent Fulfillment)
+    if re.search(r'\?\s*\w{2,}:', content): # Simple check for a question followed by a clear break/answer
+        findings['eeat']['cues'].append("Found explicit **Question-Answer structure** (signals intent fulfillment).")
+        score_eeat += 5
+    else:
+        add_missing('eeat', "Missing explicit **Question-Answer** sections for direct intent fulfillment.", False)
+
+    # Check for Author/Persona
+    if re.search(r'author:', clean_content) and re.search(r'(dr\.|ph\.d\.)', clean_content):
+         findings['eeat']['cues'].append("Found explicit **Author/Expert Persona** (Dr., Ph.D. etc.).")
+         score_eeat += 5
+    elif re.search(r'author:', clean_content):
+         findings['eeat']['cues'].append("Found clear **Author declaration**.")
+         score_eeat += 2
+    else:
+        add_missing('eeat', "No visible **Author/Expert** declaration.", True)
+
+
+    if utility_cues > 0:
+        score_eeat += min(5, utility_cues * 2)
+
+    if score_eeat == 0:
+        add_missing('eeat', "Content appears low-effort or AI-generated without editorial oversight.", True)
+
+    findings['eeat']['score'] = min(EEAT_MAX_SCORE, score_eeat)
+
+
+    # --- 2. Keyword Relevance & Placement Analysis (Max 20 Pts) ---
+    score_keyword = 0
+    keyword_words = target_keyword.lower().split()
+    keyword_mentions = len(re.findall(re.escape(target_keyword.lower()), clean_content))
+
+    # A. Density (Weighted 10 pts)
+    if word_count > 0:
+        density = (keyword_mentions / word_count) * 100
+        findings['keyword']['cues'].append(f"Keyword Density: {density:.2f}% ({keyword_mentions} mentions). Target is {KEYWORD_DENSITY_TARGET[0]:.2f}% - {KEYWORD_DENSITY_TARGET[1]:.2f}%.")
+        if KEYWORD_DENSITY_TARGET[0] <= density <= KEYWORD_DENSITY_TARGET[1]:
+            score_keyword += 10
+        elif density < KEYWORD_DENSITY_TARGET[0]:
+            add_missing('keyword', f"Keyword density is too low ({density:.2f}%). Need more mentions.", True)
+            score_keyword += 5
         else:
-            score += WEIGHTS['EEAT_EXPERIENCE'] * 0.3
-            findings.append({"type": "Missing", "text": "Lack of verifiable first-hand Experience (E). Add 'I tested' or 'my data' cues."})
+            add_missing('keyword', f"Keyword density is too high ({density:.2f}%). Potential for keyword stuffing.", True)
+            score_keyword += 2 # Heavy penalty for stuffing
+    else:
+        add_missing('keyword', "Content is empty or too short for density analysis.", True)
 
-        # 2. Trustworthiness & Expertise (Max 15 pts)
-        trust_matches = sum(len(re.findall(k, content_lower)) for k in EEAT_TRUST_KEYWORDS)
-        if trust_matches >= 3 or 'author:' in content_lower:
-            score += WEIGHTS['EEAT_TRUST_EXPERT']
-            findings.append({"type": "Good", "text": f"Cues for authorship, sourcing, or credentials found ({trust_matches} cues). (Mandate: **Trustworthiness**)"})
-        else:
-            score += WEIGHTS['EEAT_TRUST_EXPERT'] * 0.2
-            findings.append({"type": "Missing", "text": "Clear authorship (WHO) or external sourcing/vetting signals are weak or missing. (Mandate: Trustworthiness)"})
+    # B. Placement (Weighted 10 pts)
+    # Check Title (assumed to be H1/first line in markdown)
+    title_match = re.search(r'^#\s*(.*)', content, re.MULTILINE | re.IGNORECASE)
+    if title_match and target_keyword.lower() in title_match.group(1).lower():
+        findings['keyword']['cues'].append("Keyword found in the **Title**.")
+        score_keyword += 4
+    else:
+        add_missing('keyword', "Keyword missing from the **Title**.", True)
 
-        # 3. Utility, Depth, & Intent Fulfillment (Max 10 pts)
-        # Depth Check (5 pts)
-        if word_count >= 1000:
-            score += 5
-            findings.append({"type": "Good", "text": f"Substantial content depth ({word_count} words). Supports deep user intent satisfaction."})
-        elif word_count < 300:
-            findings.append({"type": "Missing", "text": f"Content is too short ({word_count} words), risking categorization as low-utility. (Mandate: Utility)"})
-        else:
-            score += 3
-            findings.append({"type": "Warn", "text": f"Mid-range length ({word_count} words). Ensure quality outweighs the quantity."})
+    # Check Introduction
+    if target_keyword.lower() in intro_content[:KEYWORD_PLACEMENT_LENGTH]:
+        findings['keyword']['cues'].append(f"Keyword found in the **Introduction** (first {KEYWORD_PLACEMENT_LENGTH} chars).")
+        score_keyword += 4
+    else:
+        add_missing('keyword', "Keyword missing from the **first 150 characters** of the introduction.", True)
 
-        # Intent Fulfillment (Question-Answer Structure) (5 pts)
-        question_matches = len(re.findall(r'\?[\s\n][A-Z]', content)) # Question followed by capitalized letter (start of answer)
-        if question_matches >= 3:
-            score += 5
-            findings.append({"type": "Good", "text": f"Strong **Intent Fulfillment** structure ({question_matches} Q/A cues). Excellent 'People-First' signal."})
-        elif question_matches >= 1:
-            score += 2
-            findings.append({"type": "Warn", "text": "Some Q/A structure found. Explicitly ask and answer user questions within the body."})
+    # Check Conclusion
+    if target_keyword.lower() in conclusion_content:
+        findings['keyword']['cues'].append("Keyword found in the **Conclusion**.")
+        score_keyword += 2
+    else:
+        add_missing('keyword', "Keyword missing from the **Conclusion**.", False)
 
-        return round(score, 2), findings
-
-    def check_keyword_relevance(content: str, target_keyword: str, word_count: int, sections: Dict[str, Any]) -> Tuple[float, list]:
-        """II. Topical Relevance (Max 20 pts)"""
-        score = 0
-        findings = []
-        if not target_keyword:
-            return 0, [{"type": "Warn", "text": "Target Keyword is missing. Relevance analysis skipped."}]
-            
-        keyword_lower = target_keyword.lower()
-        
-        # 1. Density Check (Max 10 pts)
-        keyword_matches = len(re.findall(r'\b' + re.escape(keyword_lower) + r'\b', content.lower()))
-        density = (keyword_matches / word_count) * 100 if word_count > 0 else 0
-        
-        if 1.0 <= density <= 3.0:
-            score += 10
-            findings.append({"type": "Good", "text": f"Optimal Keyword Density ({density:.2f}%) achieved. (Target: 1%-3%)."})
-        elif density > 4.0:
-            findings.append({"type": "Missing", "text": f"High Density ({density:.2f}%) suggests keyword stuffing/over-optimization risk."})
-        else:
-            score += 5
-            findings.append({"type": "Warn", "text": f"Sub-optimal Density ({density:.2f}%). Review for under or slight over-optimization."})
+    findings['keyword']['score'] = min(KEYWORD_MAX_SCORE, score_keyword)
 
 
-        # 2. Contextual Placement (Max 10 pts)
-        if keyword_lower in sections['intro'].lower():
-            score += 10
-            findings.append({"type": "Good", "text": "Keyword found in the critical **Introduction** section (Strong Contextual Relevance)."})
-        else:
-            findings.append({"type": "Missing", "text": "Keyword not found in the introductory context (Usability/Context)."})
+    # --- 3. Integrity & Compliance (SpamBrain / Helpful Content) (Max 20 Pts) ---
+    score_integrity = 20
+    penalty_count = 0
 
-        return round(score, 2), findings
+    # A. Spammy Language Penalty
+    spam_cues = 0
+    for keyword in SPAMMY_KEYWORDS:
+        if re.search(keyword, clean_content):
+            findings['integrity']['cues'].append(f"Found Spam signal: '{keyword.strip('r\\')}'")
+            spam_cues += 1
+    if spam_cues > 0:
+        score_integrity -= 5
+        penalty_count += 1
+        add_missing('integrity', f"Excessive commercial/spammy language detected ({spam_cues} cues).", True)
+    else:
+        findings['integrity']['cues'].append("Clean language: No excessive commercial/spammy cues found.")
 
-    def check_integrity_compliance(content_lower: str) -> Tuple[float, list]:
-        """III. Integrity & Compliance (SpamBrain) (Max 20 pts)"""
-        score = WEIGHTS['INTEGRITY_COMPLIANCE'] 
-        total_penalty = 0
-        findings = []
+    # B. Repetitive/Formulaic Penalty (Suggests low editorial effort/mass-produced)
+    repetitive_cues = 0
+    for phrase in REPETITIVE_PHRASES:
+        if len(re.findall(phrase, clean_content)) > 1:
+            findings['integrity']['cues'].append(f"Found Repetitive/Formulaic cue: '{phrase.strip('r\\')}' used multiple times.")
+            repetitive_cues += 1
+    if repetitive_cues > 0:
+        score_integrity -= 5
+        penalty_count += 1
+        add_missing('integrity', f"Formulaic/Repetitive phrases detected ({repetitive_cues} cues).", True)
+    else:
+        findings['integrity']['cues'].append("Low repetition: Content appears editorially distinct and not formulaic.")
 
-        # Penalty 1: Spam/Commercial Language (Max -5 pts)
-        spam_matches = sum(len(re.findall(k, content_lower)) for k in SPAM_MANIPULATION_KEYWORDS)
-        if spam_matches > 0:
-            penalty = min(spam_matches * 5, 10)
-            score -= penalty
-            total_penalty += penalty
-            findings.append({"type": "Missing", "text": f"**Commercial/Spammy language** detected ({spam_matches} instances). (Mandate: SpamBrain)"})
+    # C. AI Transparency Penalty (Applies if penalties already incurred)
+    ai_disclosed = any(re.search(k, clean_content) for k in AI_DISCLOSURE_KEYWORDS)
 
-        # Penalty 2: Repetitive/Formulaic Patterns (Max -5 pts)
-        repetitive_matches = sum(len(re.findall(k, content_lower)) for k in REPETITIVE_PATTERNS)
-        if repetitive_matches >= 3:
-            score -= 5
-            total_penalty += 5
-            findings.append({"type": "Missing", "text": f"High frequency of **repetitive, formulaic phrasing** ({repetitive_matches} matches). (Mandate: Search Engine-First Warning)"})
-        
-        # Transparency Check & Penalty 3 (Max -10 pts)
-        is_ai_disclosed = any(k in content_lower for k in AI_DISCLOSURE_KEYWORDS)
+    if not ai_disclosed and score_integrity < 20: # Penalize undisclosed AI use ONLY if other spam/low-quality signals exist
+        score_integrity -= 5
+        penalty_count += 1
+        add_missing('integrity', "**AI Transparency Missing:** No AI disclosure found, penalizing for lack of transparency combined with quality issues.", True)
+    elif ai_disclosed:
+        findings['integrity']['cues'].append("AI Use is **Disclosed** (Good transparency signal).")
+    else:
+        findings['integrity']['cues'].append("AI Use is either not present or is undisclosed but currently non-penalizing.")
 
-        if is_ai_disclosed:
-            findings.append({"type": "Good", "text": 'Explicit **AI use disclosure** detected. (Mandate: The HOW of Transparency)'})
-        else:
-            findings.append({"type": "Missing", "text": 'AI use is **not disclosed**. Clarify the role of automation if LLMs were used. (Mandate: Transparency)'})
-            
-            if total_penalty > 0:
-                score -= 10
-                total_penalty += 10
-                findings.append({"type": "Missing", "text": '***CRITICAL:*** Lack of AI disclosure combined with other manipulative signals increases the risk of a SpamBrain violation.'})
+    # D. Thin Content Penalty
+    if word_count < MIN_WORD_COUNT:
+        score_integrity -= 5
+        penalty_count += 1
+        add_missing('integrity', f"Content is too thin (Word Count: {word_count}). Target minimum is {MIN_WORD_COUNT} words.", True)
 
-        # FINAL ZERO-OUT RULE: If the total penalty is too high (>= 20), set score to 0
-        if total_penalty >= 20: 
-            score = 0
-            findings.append({"type": "Missing", "text": '**TOTAL FAILURE:** Multiple severe compliance issues detected. Score reset to 0/20 per strict compliance policy.'})
+    # E. Zero Score Rule (Mandatory Compliance Failure)
+    if penalty_count >= 2:
+        findings['integrity']['cues'].append("TOTAL FAILURE: Multiple severe compliance issues detected. Score is reset to **0/20** per strict compliance policy.")
+        score_integrity = 0
+    elif score_integrity < 0:
+        score_integrity = 0
 
-        return max(0, score), findings
-    
-    def check_technical_freshness_linking(content_lower: str, sections: Dict[str, Any], flesch_ease: float) -> Tuple[float, list]:
-        """IV. Technical, Freshness & Link Strategy (Max 25 pts)"""
-        score = 0
-        findings = []
-        
-        # 1. Usability & Readability (Page Experience Proxy) (Max 10 pts)
-        # Flesch Readability Check (5 pts)
-        if flesch_ease > 60:
-            score += 5
-            findings.append({"type": "Good", "text": f"High Readability (Flesch Ease: {flesch_ease:.1f}). Supports mobile/Page Experience."})
-        else:
-            findings.append({"type": "Missing", "text": f"Low Readability (Flesch Ease: {flesch_ease:.1f}). Text is complex; hurts user experience."})
+    findings['integrity']['score'] = min(INTEGRITY_MAX_SCORE, score_integrity)
 
-        # Paragraph Length Check (5 pts)
-        paragraphs = sections['paragraphs']
-        if paragraphs:
-            para_word_counts = [len(re.findall(r'\b\w+\b', p)) for p in paragraphs]
-            avg_para_length = sum(para_word_counts) / len(paragraphs)
-            
-            if avg_para_length < 80:
-                score += 5
-                findings.append({"type": "Good", "text": f"Excellent paragraph segmentation (Avg. {avg_para_length:.1f} words)."})
-            else:
-                findings.append({"type": "Missing", "text": f"Poor paragraph segmentation (Avg. {avg_para_length:.1f} words). Break up large blocks."})
-        
-        # 2. Freshness Signal (Max 5 pts)
-        freshness_match = len(re.findall(FRESHNESS_LINKING_KEYWORDS["updated_date"], content_lower))
-        if freshness_match >= 1:
-            score += 5
-            findings.append({"type": "Good", "text": "Explicit **Freshness Signal** detected (e.g., 'Updated: 2024'). Signals active maintenance."})
-        else:
-            findings.append({"type": "Warn", "text": "Missing clear date/freshness cues (e.g., 'Updated: [Year]'). Add a recent update timestamp."})
+    # --- 4. Technical, Freshness & Link Strategy (Max 20 Pts) ---
+    score_tech = 0
 
-        # 3. Linking Strategy (Internal/External) (Max 10 pts)
-        internal_links = len(re.findall(FRESHNESS_LINKING_KEYWORDS["internal_link"], content_lower))
-        external_links = len(re.findall(FRESHNESS_LINKING_KEYWORDS["external_link"], content_lower))
-        
-        if internal_links >= 3 and external_links >= 1:
-            score += 10
-            findings.append({"type": "Good", "text": f"Strong Linking Strategy found ({internal_links} Internal, {external_links} External). Excellent for authority and site quality."})
-        elif internal_links >= 1 or external_links >= 1:
-            score += 5
-            findings.append({"type": "Warn", "text": f"Weak Linking Strategy detected. Ensure at least 3 [Internal Link] and 1 [External Link] for authority building."})
-        else:
-            findings.append({"type": "Missing", "text": "No Link Placeholders found. Add **[Internal Link]** and **[External Link]** cues where appropriate."})
-            
-        return max(0, score), findings
+    # A. Freshness Signals (Weighted 5 pts)
+    freshness_cues = sum(1 for keyword in FRESHNESS_KEYWORDS if re.search(keyword, clean_content))
+    if freshness_cues > 0:
+        findings['technical']['cues'].append(f"Found Freshness Cues ({freshness_cues}).")
+        score_tech += min(5, freshness_cues * 3)
+    else:
+        add_missing('technical', "No clear **'Updated:'** date or **Freshness** signals.", True)
 
+    # B. Internal & External Link Strategy (Weighted 5 pts)
+    internal_links = len(re.findall(r'\[internal link', clean_content))
+    external_links = len(re.findall(r'\[external link', clean_content))
 
-    # --- Execute Checks ---
-    
-    score_eeat, findings_eeat = check_eeat_utility(content_lower, word_count, sections)
-    score_keyword, findings_keyword = check_keyword_relevance(content, target_keyword, word_count, sections)
-    score_integrity, findings_integrity = check_integrity_compliance(content_lower)
-    score_tech_exp, findings_tech_exp = check_technical_freshness_linking(content_lower, sections, results['flesch_ease'])
+    if internal_links >= 2:
+        findings['technical']['cues'].append(f"Found {internal_links} **Internal Link** placeholders (Signals good site structure).")
+        score_tech += 3
+    else:
+        add_missing('technical', "Need more **[Internal Link]** placeholders (Target >= 2).", False)
 
-    results["sections"]["I. Editorial & Authority (E-E-A-T, Intent)"] = {"score": score_eeat, "max": 35, "findings": findings_eeat}
-    results["sections"]["II. Topical Relevance (Keyword Alignment)"] = {"score": score_keyword, "max": 20, "findings": findings_keyword}
-    results["sections"]["III. Integrity & Compliance (SpamBrain)"] = {"score": score_integrity, "max": 20, "findings": findings_integrity}
-    results["sections"]["IV. Technical, Freshness & Link Strategy"] = {"score": score_tech_exp, "max": 25, "findings": findings_tech_exp}
-    results["sections_data"] = sections
+    if external_links >= 1:
+        findings['technical']['cues'].append(f"Found {external_links} **External Link** placeholders (Signals good sourcing/Trust).")
+        score_tech += 2
+    else:
+        add_missing('technical', "Missing **[External Link]** placeholders (Target >= 1).", True)
 
-    results["total_score"] = score_eeat + score_keyword + score_integrity + score_tech_exp
-    return results
+    # C. Usability & Structure (Weighted 10 pts)
+    # Check for Headings (assuming use of ## and ###)
+    h2_count = len(re.findall(r'^##\s', content, re.MULTILINE))
+    h3_count = len(re.findall(r'^###\s', content, re.MULTILINE))
 
-# --- Streamlit UI and Report Generation (Same as previous version for stability) ---
+    if h2_count >= 3:
+        findings['technical']['cues'].append(f"Found {h2_count} primary section headings (**##**).")
+        score_tech += 5
+    else:
+        add_missing('technical', "Need more primary section headings (**##**); content lacks clear hierarchy.", True)
 
-def generate_streamlit_report(results: Dict[str, Any]):
-    """Generates the Streamlit display for the analysis report."""
-    
-    max_total_score = sum(WEIGHTS.values())
-    percentage = (results['total_score'] / max_total_score) * 100
-    
-    st.markdown("---")
-    
-    # -------------------------------------------------------------------
-    # Actionable Summary & Core Metrics
-    # -------------------------------------------------------------------
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(label="Overall Quality Score", 
-                  value=f"{results['total_score']:.2f} / {max_total_score}",
-                  delta=f"{percentage:.1f}%")
+    # Paragraph Length Check (Heuristic for mobile usability/readability)
+    long_paragraphs = sum(1 for p in paragraphs if len(re.findall(r'[.!?]+', p)) > 7)
+    if long_paragraphs == 0 and len(paragraphs) > 5:
+        findings['technical']['cues'].append("Paragraphs are short and digestible (good mobile UX).")
+        score_tech += 5
+    elif long_paragraphs > 0:
+        add_missing('technical', f"Found {long_paragraphs} long paragraphs (potential mobile/readability issue).", True)
+        score_tech += 2
 
-    with col2:
-        st.metric(label="Word Count", value=results['word_count'])
+    findings['technical']['score'] = min(TECH_MAX_SCORE, score_tech)
 
-    with col3:
-        # Display Flesch Ease with descriptive feedback
-        flesch_ease = results['flesch_ease']
-        if flesch_ease >= 60:
-            ease_feedback = "Easy to Read"
-        elif flesch_ease >= 30:
-            ease_feedback = "Moderately Difficult"
-        else:
-            ease_feedback = "Very Difficult"
-        st.metric(label="Flesch Reading Ease", value=f"{flesch_ease:.1f}", delta=ease_feedback)
+    # --- Final Score Aggregation ---
+    total_score = findings['eeat']['score'] + findings['keyword']['score'] + \
+                  findings['integrity']['score'] + findings['technical']['score']
 
-    with col4:
-        if percentage >= 85:
-            st.success("Status: EXCELLENT (High alignment with all core systems.)")
-        elif percentage >= 60:
-            st.warning("Status: GOOD (Foundation is strong; risks need mitigation.)")
-        else:
-            st.error("Status: ACTION REQUIRED (Missing key quality signals.)")
-            
-    st.markdown("---")
-    
-    # Actionable Priority List
-    priority_findings = []
-    for section_title, section in results['sections'].items():
-        if section_title != "sections_data":
-            priority_findings.extend([
-                f"**{section_title.split('(')[0].strip()}** | {f['text'].replace('***CRITICAL:***', '')}" 
-                for f in section['findings'] if f['type'] in ('Missing', 'Warn')
-            ])
-
-    if priority_findings:
-        st.header("🎯 Priority Action List")
-        st.caption("Focus on these issues first to minimize risk and maximize compliance.")
-        for i, finding in enumerate(priority_findings[:5]): # Show top 5 priorities
-            st.markdown(f"**{i+1}.** {finding}")
-        st.markdown("---")
-    
-    # -------------------------------------------------------------------
-    # Detailed Section Breakdown
-    # -------------------------------------------------------------------
-    
-    st.header("Comprehensive Breakdown by Ranking Mandate")
-    
-    for title, section in results['sections'].items():
-        if title == "sections_data": continue
-        
-        section_percent = (section['score'] / section['max']) * 100
-        
-        # Determine the icon based on the section score
-        if section_percent >= 85:
-            icon = "✅"
-            expander = st.expander(f"**{icon} {title}** (Score: {section['score']:.2f} / {section['max']} pts)", expanded=False)
-        elif section_percent >= 50:
-            icon = "🟡"
-            expander = st.expander(f"**{icon} {title}** (Score: {section['score']:.2f} / {section['max']} pts)", expanded=True)
-        else:
-            icon = "❌"
-            expander = st.expander(f"**{icon} {title}** (Score: {section['score']:.2f} / {section['max']} pts)", expanded=True)
-
-        with expander:
-            st.caption(f"Section Alignment: {section_percent:.1f}%")
-            for finding in section['findings']:
-                if finding['type'] == 'Good':
-                    st.success(f"**Positive Cue:** {finding['text']}", icon="👍")
-                elif finding['type'] == 'Warn':
-                    st.warning(f"**Improvement Needed:** {finding['text']}", icon="⚠️")
-                else:
-                    st.error(f"**Missing Signal:** {finding['text']}", icon="🛑")
+    return findings, total_score, word_count, paragraphs
 
 
-def render_structural_map(sections: Dict[str, Any]):
-    """Renders the Structural Map in the sidebar."""
-    st.sidebar.header("🗺️ Structural Map")
-    st.sidebar.caption("Review H2/H3/H4 hierarchy.")
-    
-    headings = sections['headings']
-    if not headings:
-        st.sidebar.warning("No headings (##, ###, ####) found in content.")
-        return
+# --- Streamlit UI Layout ---
 
-    map_html = "<ul>"
-    for level_str, text in headings:
-        level = len(level_str) 
-        indent = (level - 2) * 20 
-        
-        if level == 2:
-            symbol = "●"
-            style = "font-weight: bold;"
-        elif level == 3:
-            symbol = "○"
-            style = "font-style: italic;"
-        else:
-            symbol = "—"
-            style = ""
-            
-        map_html += f"<li style='margin-left: {indent}px; {style} list-style: none;'>{symbol} {text}</li>"
-        
-    map_html += "</ul>"
-    st.sidebar.markdown(map_html, unsafe_allow_html=True)
-
-
-def main():
-    st.set_page_config(page_title="Google Ranking Content Analyzer (V5)", layout="wide")
-    
-    st.title("📚 Comprehensive Content Quality Analyzer (V5)")
-    st.markdown("""
-        Analyzes content against four core mandates: **E-E-A-T/Intent**, **Relevance**, **Integrity**, and **Freshness/Linking Strategy**.
-    """)
+def main_app():
+    """Main function to run the Streamlit application."""
+    st.title("Google Ranking Systems Content Analyzer")
     st.markdown("---")
 
-    col_input_1, col_input_2 = st.columns([3, 1])
-    
-    with col_input_2:
-        target_keyword = st.text_input(
-            "Target Keyword/Phrase",
-            placeholder="e.g., Core Web Vitals best practices"
-        )
-    
-    with col_input_1:
-        placeholder_content = """
-        Paste your article or draft content here. Use double newlines for paragraph breaks (Enter twice).
+    # Define the template/placeholder content
+    placeholder_content = """
+# The Essential Guide to Ranking Systems (Updated: 2024)
+Author: Dr. Jenna Smith, Ph.D. in Computer Science
 
-        To score well on the new checks, include:
-        1. Experience cues (e.g., 'I tested', 'my results').
-        2. Q/A structure (e.g., "Why is this important? The reason is...").
-        3. Freshness cues (e.g., 'Updated: 2024').
-        4. Link Cues (e.g., '[Internal Link]' or '[External Link]').
-        """
+### Understanding the Core Systems
+I found that after rigorous testing on over 100 pages, the single most critical factor is the application of the Experience (E) component of E-E-A-T. In my experience, content must demonstrate original insights.
+
+Why is this level of detail important? The reason is that Google’s Helpful Content System penalizes content that lacks original value. [Internal Link]
+
+### Building Trust and Authority
+The Trustworthiness (T) mandate requires clear sourcing. We have cited 12 different external sources to back up our claims. This provides strong confidence to the reader and signals high Expertise (E) to the system.
+
+[External Link]
+
+This article is current as of 2024. [Internal Link]
+"""
+
+    # --- Input Section ---
+    col_input, col_preview = st.columns([1, 1])
+
+    with col_input:
+        st.subheader("1. Paste Your Content Draft (Markdown)")
+        target_keyword = st.text_input("Target Keyword/Phrase (Required)", "Google Ranking Systems")
+        
+        # Text area with explicit instructions for markdown structure
         content = st.text_area(
-            "Paste Content for Analysis",
-            placeholder=placeholder_content,
-            height=350
+            "Content Draft",
+            placeholder_content,
+            height=400,
+            help="Paste your full content draft. For the best analysis, include Markdown cues like **## Headings**, **[Link Text]** placeholders, and the **'Updated:'** tag for Freshness checks.",
         )
-    
-    if st.button("Run Comprehensive Analysis", type="primary"):
-        if not content:
-            st.error("Please paste content into the text area to run the analysis.")
-        else:
-            with st.spinner('Analyzing content against core ranking guidelines...'):
-                analysis_results = analyze_content(content, target_keyword)
-                
-                render_structural_map(analysis_results["sections_data"])
-                generate_streamlit_report(analysis_results)
+        analyze_button = st.button("Run Comprehensive Analysis")
 
-if __name__ == "__main__":
-    main()
+    with col_preview:
+        st.subheader("2. Real-Time Markdown Preview")
+        st.markdown(content, unsafe_allow_html=True)
+
+
+    st.markdown("---")
+
+    # --- Analysis Output Section ---
+    if analyze_button and content and target_keyword:
+        findings, total_score, word_count, paragraphs = analyze_content(content, target_keyword)
+        score_percent = (total_score / 100) * 100
+        reading_ease, ease_grade = calculate_reading_ease(content)
+
+        # --- Top Summary Row ---
+        st.header("Comprehensive Content Analysis Report")
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        with col1:
+            st.markdown(f'<div class="score-card"><div class="score-value">{total_score}/100</div><div class="score-label">TOTAL RANKING SCORE</div></div>', unsafe_allow_html=True)
+        with col2:
+            st.markdown(f'<div class="score-card"><div class="score-value">{word_count}</div><div class="score-label">WORD COUNT</div></div>', unsafe_allow_html=True)
+        with col3:
+            st.markdown(f'<div class="score-card"><div class="score-value">{len(paragraphs)}</div><div class="score-label">PARAGRAPHS</div></div>', unsafe_allow_html=True)
+        with col4:
+            st.markdown(f'<div class="score-card"><div class="score-value">{reading_ease:.1f}</div><div class="score-label">FLESCH EASE SCORE</div></div>', unsafe_allow_html=True)
+        with col5:
+            st.markdown(f'<div class="score-card"><div class="score-value">{ease_grade}</div><div class="score-label">READABILITY GRADE</div></div>', unsafe_allow_html=True)
+
+
+        st.subheader("3. 🎯 Priority Actions List")
+        if findings['priority_actions']:
+            st.warning("⚠️ Critical Fixes Recommended")
+            for action in set(findings['priority_actions']): # Use set to remove duplicates
+                st.markdown(f'<div class="priority-item">{action}</div>', unsafe_allow_html=True)
+        else:
+            st.success("🎉 No high-priority missing signals detected.")
+
+        st.markdown("---")
+
+        # --- Detailed Section Analysis ---
+
+        # 1. E-E-A-T & Utility
+        st.subheader(f"I. E-E-A-T & Utility ({findings['eeat']['score']}/{findings['eeat']['max']} pts)")
+        col_eeat_cue, col_eeat_miss = st.columns(2)
+        with col_eeat_cue:
+            st.markdown("#### Positive Cues (Strengths)")
+            for cue in findings['eeat']['cues']:
+                st.markdown(f'<div class="positive-cue">✅ {cue}</div>', unsafe_allow_html=True)
+            if not findings['eeat']['cues']:
+                st.markdown("No strong E-E-A-T or Utility cues found.")
+        with col_eeat_miss:
+            st.markdown("#### Missing Signals (Improvement)")
+            for miss in findings['eeat']['missing']:
+                st.markdown(f'<div class="missing-signal">❌ {miss}</div>', unsafe_allow_html=True)
+            if not findings['eeat']['missing']:
+                st.markdown("All primary E-E-A-T signals appear present.")
+
+        st.markdown("---")
+
+        # 2. Keyword Relevance
+        st.subheader(f"II. Keyword Relevance ({findings['keyword']['score']}/{findings['keyword']['max']} pts)")
+        col_kw_cue, col_kw_miss = st.columns(2)
+        with col_kw_cue:
+            st.markdown("#### Positive Cues (Strengths)")
+            for cue in findings['keyword']['cues']:
+                st.markdown(f'<div class="positive-cue">✅ {cue}</div>', unsafe_allow_html=True)
+            if not findings['keyword']['cues']:
+                st.markdown("No keyword cues found.")
+        with col_kw_miss:
+            st.markdown("#### Missing Signals (Improvement)")
+            for miss in findings['keyword']['missing']:
+                st.markdown(f'<div class="missing-signal">❌ {miss}</div>', unsafe_allow_html=True)
+            if not findings['keyword']['missing']:
+                st.markdown("Keyword placement is optimized.")
+
+        st.markdown("---")
+
+        # 3. Integrity & Compliance (SpamBrain)
+        st.subheader(f"III. Integrity & Compliance (SpamBrain) ({findings['integrity']['score']}/{findings['integrity']['max']} pts)")
+        col_int_cue, col_int_miss = st.columns(2)
+        with col_int_cue:
+            st.markdown("#### Compliance Status")
+            for cue in findings['integrity']['cues']:
+                st.markdown(f'<div class="positive-cue">✅ {cue}</div>', unsafe_allow_html=True)
+            if not findings['integrity']['cues']:
+                st.markdown("No immediate compliance cues found (neutral).")
+        with col_int_miss:
+            st.markdown("#### Violation Warnings")
+            for miss in findings['integrity']['missing']:
+                st.markdown(f'<div class="missing-signal">❌ {miss}</div>', unsafe_allow_html=True)
+            if not findings['integrity']['missing']:
+                st.markdown("No major violation warnings detected.")
+
+        st.markdown("---")
+
+        # 4. Technical, Freshness & Link Strategy
+        st.subheader(f"IV. Technical, Freshness & Link Strategy ({findings['technical']['score']}/{findings['technical']['max']} pts)")
+        col_tech_cue, col_tech_miss = st.columns(2)
+        with col_tech_cue:
+            st.markdown("#### Positive Cues (Strengths)")
+            for cue in findings['technical']['cues']:
+                st.markdown(f'<div class="positive-cue">✅ {cue}</div>', unsafe_allow_html=True)
+            if not findings['technical']['cues']:
+                st.markdown("No technical or link cues found.")
+        with col_tech_miss:
+            st.markdown("#### Missing Signals (Improvement)")
+            for miss in findings['technical']['missing']:
+                st.markdown(f'<div class="missing-signal">❌ {miss}</div>', unsafe_allow_html=True)
+            if not findings['technical']['missing']:
+                st.markdown("Structural/Technical elements appear strong.")
+
+        st.markdown("---")
+        st.info("💡 **Next Steps:** Use the Priority Actions List to refine your draft, paying special attention to E-E-A-T signals like original experience and strong external sourcing.")
+
+    elif analyze_button:
+        st.error("Please ensure you paste content and enter a target keyword before running the analysis.")
+
+if __name__ == '__main__':
+    main_app()
