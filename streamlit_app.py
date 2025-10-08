@@ -68,8 +68,8 @@ st.markdown("""
 
 # --- Analysis Constants (Derived from Google Ranking Systems Research) ---
 
-# Section 1: E-E-A-T (Experience, Expertise, Authority, Trust) & Utility (Max 40 Pts)
-EEAT_MAX_SCORE = 40
+# Section 1: E-E-A-T (Experience, Expertise, Authority, Trust) & Utility (Max 45 Pts)
+EEAT_MAX_SCORE = 45 # Increased to 45 for Semantic Coverage
 EEAT_TRUST_KEYWORDS = [
     r"author:", r"cited", r"sources", r"data suggests", r"peer-reviewed", r"methodology", r"disclosure"
 ]
@@ -79,7 +79,10 @@ EEAT_EXPERIENCE_KEYWORDS = [
 UTILITY_KEYWORDS = [
     r"step-by-step", r"how to", r"tutorial", r"actionable", r"comprehensive", r"guide", r"in-depth"
 ]
-# Weighting: 20 pts for EEAT cues, 20 pts for Utility/Depth/Intent
+SEMANTIC_CUES = [
+    r"alternatives", r"pros and cons", r"case study", r"future of", r"implications", r"history of", r"comparison"
+]
+# Weighting: Experience & Trust (20 pts), Utility & Intent (15 pts), Semantic Coverage (10 pts)
 
 # Section 2: Keyword Relevance & Placement (Max 20 Pts)
 KEYWORD_MAX_SCORE = 20
@@ -99,11 +102,11 @@ AI_DISCLOSURE_KEYWORDS = [
 ]
 MIN_WORD_COUNT = 300 # Heuristic for thin content penalty
 
-# Section 4: Technical, Freshness & Link Strategy (Page Experience / Site Quality) (Max 20 Pts)
-TECH_MAX_SCORE = 20
+# Section 4: Technical, Freshness & Link Strategy (Page Experience / Site Quality) (Max 15 Pts)
+TECH_MAX_SCORE = 15 # Decreased to 15
 FRESHNESS_KEYWORDS = [r"updated:", r"current as of", r"latest research", r"recent changes"]
 LINK_PLACEHOLDERS = [r"\[internal link", r"\[external link"]
-# Usability Check: Short paragraphs (3-7 sentences recommended for mobile UX)
+# Weighting: Freshness (5 pts), Linking (5 pts), Usability/Structure (5 pts)
 
 # --- Core Analysis Functions ---
 
@@ -158,10 +161,10 @@ def analyze_content(content, target_keyword):
         if priority:
             findings['priority_actions'].append(signal)
 
-    # --- 1. E-E-A-T & Utility Analysis (Max 40 Pts) ---
-    score_eeat = 0
+    # --- 1. E-E-A-T & Utility Analysis (Max 45 Pts) ---
+    eeat_total_score = 0 # Out of 45
 
-    # A. Experience & Trust (Weighted 25 pts)
+    # A. Experience & Trust (Weighted 20 pts)
     eeat_cues = 0
     for keyword in EEAT_EXPERIENCE_KEYWORDS:
         if re.search(keyword, clean_content):
@@ -173,7 +176,7 @@ def analyze_content(content, target_keyword):
             eeat_cues += 1
 
     if eeat_cues > 0:
-        score_eeat += min(25, eeat_cues * 5)
+        eeat_total_score += min(20, eeat_cues * 4)
     else:
         add_missing('eeat', "No clear **first-hand experience** or **trust signals** (e.g., 'I tested,' 'cited sources').", True)
 
@@ -187,28 +190,43 @@ def analyze_content(content, target_keyword):
     # Check for Explicit Question-Answer Structure (Signals High Intent Fulfillment)
     if re.search(r'\?\s*\w{2,}:', content): # Simple check for a question followed by a clear break/answer
         findings['eeat']['cues'].append("Found explicit **Question-Answer structure** (signals intent fulfillment).")
-        score_eeat += 5
+        eeat_total_score += 5
     else:
         add_missing('eeat', "Missing explicit **Question-Answer** sections for direct intent fulfillment.", False)
 
     # Check for Author/Persona
     if re.search(r'author:', clean_content) and re.search(r'(dr\.|ph\.d\.)', clean_content):
          findings['eeat']['cues'].append("Found explicit **Author/Expert Persona** (Dr., Ph.D. etc.).")
-         score_eeat += 5
+         eeat_total_score += 5
     elif re.search(r'author:', clean_content):
          findings['eeat']['cues'].append("Found clear **Author declaration**.")
-         score_eeat += 2
+         eeat_total_score += 2
     else:
         add_missing('eeat', "No visible **Author/Expert** declaration.", True)
 
 
     if utility_cues > 0:
-        score_eeat += min(5, utility_cues * 2)
+        eeat_total_score += min(5, utility_cues * 2)
 
-    if score_eeat == 0:
+    # C. Semantic Coverage (NEW - Weighted 10 pts)
+    semantic_cues = 0
+    for keyword in SEMANTIC_CUES:
+        if re.search(keyword, clean_content):
+            findings['eeat']['cues'].append(f"Found Semantic cue: '{keyword.strip('r\\').replace('r\\', '')}' (Topic Coverage).")
+            semantic_cues += 1
+
+    if semantic_cues >= 3:
+        findings['eeat']['cues'].append("Strong **Semantic Coverage** detected (>= 3 subtopics).")
+        eeat_total_score += 10
+    elif semantic_cues >= 1:
+        eeat_total_score += 5
+    else:
+        add_missing('eeat', "Missing strong **Semantic Coverage**. Explore related subtopics (e.g., 'Alternatives', 'Pros & Cons').", True)
+
+    if eeat_total_score == 0:
         add_missing('eeat', "Content appears low-effort or AI-generated without editorial oversight.", True)
 
-    findings['eeat']['score'] = min(EEAT_MAX_SCORE, score_eeat)
+    findings['eeat']['score'] = min(EEAT_MAX_SCORE, eeat_total_score)
 
 
     # --- 2. Keyword Relevance & Placement Analysis (Max 20 Pts) ---
@@ -277,6 +295,7 @@ def analyze_content(content, target_keyword):
     # B. Repetitive/Formulaic Penalty (Suggests low editorial effort/mass-produced)
     repetitive_cues = 0
     for phrase in REPETITIVE_PHRASES:
+        # Check for phrase repeated more than once
         if len(re.findall(phrase, clean_content)) > 1:
             findings['integrity']['cues'].append(f"Found Repetitive/Formulaic cue: '{phrase.strip('r\\')}' used multiple times.")
             repetitive_cues += 1
@@ -314,14 +333,14 @@ def analyze_content(content, target_keyword):
 
     findings['integrity']['score'] = min(INTEGRITY_MAX_SCORE, score_integrity)
 
-    # --- 4. Technical, Freshness & Link Strategy (Max 20 Pts) ---
+    # --- 4. Technical, Freshness & Link Strategy (Max 15 Pts) ---
     score_tech = 0
 
     # A. Freshness Signals (Weighted 5 pts)
     freshness_cues = sum(1 for keyword in FRESHNESS_KEYWORDS if re.search(keyword, clean_content))
     if freshness_cues > 0:
         findings['technical']['cues'].append(f"Found Freshness Cues ({freshness_cues}).")
-        score_tech += min(5, freshness_cues * 3)
+        score_tech += 5
     else:
         add_missing('technical', "No clear **'Updated:'** date or **Freshness** signals.", True)
 
@@ -341,14 +360,13 @@ def analyze_content(content, target_keyword):
     else:
         add_missing('technical', "Missing **[External Link]** placeholders (Target >= 1).", True)
 
-    # C. Usability & Structure (Weighted 10 pts)
+    # C. Usability & Structure (Weighted 5 pts)
     # Check for Headings (assuming use of ## and ###)
     h2_count = len(re.findall(r'^##\s', content, re.MULTILINE))
-    h3_count = len(re.findall(r'^###\s', content, re.MULTILINE))
 
     if h2_count >= 3:
         findings['technical']['cues'].append(f"Found {h2_count} primary section headings (**##**).")
-        score_tech += 5
+        score_tech += 3
     else:
         add_missing('technical', "Need more primary section headings (**##**); content lacks clear hierarchy.", True)
 
@@ -356,10 +374,10 @@ def analyze_content(content, target_keyword):
     long_paragraphs = sum(1 for p in paragraphs if len(re.findall(r'[.!?]+', p)) > 7)
     if long_paragraphs == 0 and len(paragraphs) > 5:
         findings['technical']['cues'].append("Paragraphs are short and digestible (good mobile UX).")
-        score_tech += 5
+        score_tech += 2
     elif long_paragraphs > 0:
         add_missing('technical', f"Found {long_paragraphs} long paragraphs (potential mobile/readability issue).", True)
-        score_tech += 2
+        score_tech += 1
 
     findings['technical']['score'] = min(TECH_MAX_SCORE, score_tech)
 
@@ -382,24 +400,35 @@ def main_app():
 # The Essential Guide to Ranking Systems (Updated: 2024)
 Author: Dr. Jenna Smith, Ph.D. in Computer Science
 
-### Understanding the Core Systems
+### Understanding the Core Systems: Pros and Cons
 I found that after rigorous testing on over 100 pages, the single most critical factor is the application of the Experience (E) component of E-E-A-T. In my experience, content must demonstrate original insights.
 
 Why is this level of detail important? The reason is that Google’s Helpful Content System penalizes content that lacks original value. [Internal Link]
 
-### Building Trust and Authority
+## Building Trust and Authority
 The Trustworthiness (T) mandate requires clear sourcing. We have cited 12 different external sources to back up our claims. This provides strong confidence to the reader and signals high Expertise (E) to the system.
 
 [External Link]
+
+## Semantic Coverage: The Future of Ranking
+A detailed comparison between the old ranking signals and the current, semantics-focused systems is critical for any writer. The implications of the SpamBrain system are far-reaching.
 
 This article is current as of 2024. [Internal Link]
 """
 
     # --- Input Section ---
-    col_input, col_preview = st.columns([1, 1])
+    st.subheader("1. Content Input and Preview")
+    
+    # Toggle Checkbox
+    show_preview = st.checkbox("Show Markdown Preview", value=True, help="Toggle the right-hand column to maximize space for the input draft.")
+
+    # Set column ratio based on toggle state
+    if show_preview:
+        col_input, col_preview = st.columns([1, 1])
+    else:
+        col_input, col_preview = st.columns([1, 0.001]) # Effectively one column
 
     with col_input:
-        st.subheader("1. Paste Your Content Draft (Markdown)")
         target_keyword = st.text_input("Target Keyword/Phrase (Required)", "Google Ranking Systems")
         
         # Text area with explicit instructions for markdown structure
@@ -407,13 +436,14 @@ This article is current as of 2024. [Internal Link]
             "Content Draft",
             placeholder_content,
             height=400,
-            help="Paste your full content draft. For the best analysis, include Markdown cues like **## Headings**, **[Link Text]** placeholders, and the **'Updated:'** tag for Freshness checks.",
+            help="Paste your full content draft. Use **Markdown cues** (## headings, [Link Text]) for structural analysis. Ensure your draft includes E-E-A-T signals like 'Author:' and 'I tested.'",
         )
         analyze_button = st.button("Run Comprehensive Analysis")
 
-    with col_preview:
-        st.subheader("2. Real-Time Markdown Preview")
-        st.markdown(content, unsafe_allow_html=True)
+    if show_preview:
+        with col_preview:
+            st.markdown("#### Real-Time Markdown Preview")
+            st.markdown(content, unsafe_allow_html=True)
 
 
     st.markdown("---")
@@ -454,20 +484,20 @@ This article is current as of 2024. [Internal Link]
         # --- Detailed Section Analysis ---
 
         # 1. E-E-A-T & Utility
-        st.subheader(f"I. E-E-A-T & Utility ({findings['eeat']['score']}/{findings['eeat']['max']} pts)")
+        st.subheader(f"I. E-E-A-T & Utility (Including Semantic Coverage) ({findings['eeat']['score']}/{findings['eeat']['max']} pts)")
         col_eeat_cue, col_eeat_miss = st.columns(2)
         with col_eeat_cue:
             st.markdown("#### Positive Cues (Strengths)")
             for cue in findings['eeat']['cues']:
                 st.markdown(f'<div class="positive-cue">✅ {cue}</div>', unsafe_allow_html=True)
             if not findings['eeat']['cues']:
-                st.markdown("No strong E-E-A-T or Utility cues found.")
+                st.markdown("No strong E-E-A-T, Utility, or Semantic cues found.")
         with col_eeat_miss:
             st.markdown("#### Missing Signals (Improvement)")
             for miss in findings['eeat']['missing']:
                 st.markdown(f'<div class="missing-signal">❌ {miss}</div>', unsafe_allow_html=True)
             if not findings['eeat']['missing']:
-                st.markdown("All primary E-E-A-T signals appear present.")
+                st.markdown("All primary E-E-A-T, Utility, and Semantic signals appear present.")
 
         st.markdown("---")
 
@@ -524,7 +554,7 @@ This article is current as of 2024. [Internal Link]
                 st.markdown("Structural/Technical elements appear strong.")
 
         st.markdown("---")
-        st.info("💡 **Next Steps:** Use the Priority Actions List to refine your draft, paying special attention to E-E-A-T signals like original experience and strong external sourcing.")
+        st.info("💡 **Next Steps:** Use the Priority Actions List to refine your draft, focusing on boosting E-E-A-T signals, especially through **Semantic Coverage** and **Original Experience**.")
 
     elif analyze_button:
         st.error("Please ensure you paste content and enter a target keyword before running the analysis.")
