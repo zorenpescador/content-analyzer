@@ -416,21 +416,35 @@ A detailed comparison between the old ranking signals and the current, semantics
 This article is current as of 2024. [Internal Link]
 """
 
-    # --- Input Section ---
-    st.subheader("1. Content Input and Preview")
+    # --- 1. Control Panel (Always Visible) ---
+    st.subheader("1. Control Panel")
     
-    # Toggle Checkbox
-    show_preview = st.checkbox("Show Markdown Preview", value=True, help="Toggle the right-hand column to maximize space for the input draft.")
+    col_kw, col_toggle = st.columns([0.7, 0.3])
+    
+    with col_kw:
+        target_keyword = st.text_input("Target Keyword/Phrase (Required)", "Google Ranking Systems")
+    
+    with col_toggle:
+        # Toggle Checkbox is now prominently placed next to the keyword input
+        st.markdown("<br>", unsafe_allow_html=True) # Add vertical space to align with text input
+        show_preview = st.checkbox(
+            "Show Markdown Preview", 
+            value=True, 
+            help="Toggle the right-hand column to maximize space for the input draft."
+        )
 
+
+    # --- 2. Content Input and Preview ---
+    st.subheader("2. Content Draft")
+    
     # Set column ratio based on toggle state
     if show_preview:
         col_input, col_preview = st.columns([1, 1])
     else:
-        col_input, col_preview = st.columns([1, 0.001]) # Effectively one column
+        # Input takes up full width if preview is off
+        col_input, col_preview = st.columns([1, 0.001]) 
 
     with col_input:
-        target_keyword = st.text_input("Target Keyword/Phrase (Required)", "Google Ranking Systems")
-        
         # Text area with explicit instructions for markdown structure
         content = st.text_area(
             "Content Draft",
